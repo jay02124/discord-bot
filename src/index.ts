@@ -3,6 +3,7 @@ import { config } from 'dotenv';
 import { LavalinkManager } from './music/lavalink';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as http from 'http';
 
 // Load environment variables
 config();
@@ -57,5 +58,15 @@ if (fs.existsSync(commandsPath)) {
 }
 
 client.on('raw', (d) => client.lavalink.sendRawData(d));
+
+// Dummy HTTP server for Render / Cloud hosting port binding
+const PORT = process.env.PORT || 3000;
+http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.write('Discord bot is running!');
+    res.end();
+}).listen(PORT, () => {
+    console.log(`Dummy HTTP server listening on port ${PORT}`);
+});
 
 client.login(process.env.DISCORD_TOKEN);
