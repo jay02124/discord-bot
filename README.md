@@ -1,4 +1,4 @@
-# Discord Music Bot
+# Lumi Heals - Discord Music Bot
 
 A feature-rich Discord music bot built with Node.js, TypeScript, discord.js v14, and Lavalink.
 
