@@ -3,7 +3,7 @@
 A feature-rich Discord music bot built with Node.js, TypeScript, discord.js v14, and Lavalink.
 
 ## Features
-- Search and play music from YouTube/Spotify
+- Search and play music from YouTube
 - Interactive Search UI
 - Autoplay related tracks
 - Standard music controls (play, pause, skip, stop, queue)
