@@ -20,7 +20,7 @@ export function buildProgressBar(position: number, duration: number, size = 15):
     const progressText = '▬'.repeat(progress);
     const emptyProgressText = '▬'.repeat(Math.max(emptyProgress, 0));
     
-    return `\`${formatTime(position)}\` ${progressText}🔘${emptyProgressText} \`${formatTime(duration)}\``;
+    return `\`${formatTime(position)}\` ${progressText}●${emptyProgressText} \`${formatTime(duration)}\``;
 }
 
 // Helper to generate a clean progress bar for volume
@@ -36,23 +36,12 @@ export function buildNowPlayingEmbed(player: any, track: any): EmbedBuilder {
     const title = track.info.title || 'Unknown Title';
     const author = track.info.author || 'Unknown Author';
     const uri = track.info.uri || '';
-    const duration = track.info.duration || 0;
-    const position = player.position || 0;
-    const requester = track.requester ? `<@${(track.requester as any).id}>` : 'Unknown';
     const artworkUrl = track.info.artworkUrl || null;
     
     const embed = new EmbedBuilder()
-        .setTitle('⚡ NOW PLAYING')
+        .setTitle('NOW PLAYING')
         .setDescription(`### **${title}**\n*by **${author}***\n\n[Open Song Link](${uri})`)
-        .setColor(player.paused ? 0x2b2d31 : 0x1DB954) // Grey if paused, Spotify Green if playing
-        .addFields(
-            { name: 'Progress Bar', value: buildProgressBar(position, duration), inline: false },
-            { name: 'Volume Level', value: `🔊 \`${buildVolumeBar(player.volume)}\` \`[${player.volume}%]\``, inline: true },
-            { name: 'Requester', value: requester, inline: true },
-            { name: 'Loop Mode', value: `🔁 \`${player.repeatMode.toUpperCase()}\``, inline: true },
-            { name: 'Autoplay', value: `🤖 \`${player.get('autoplay') ? 'Enabled' : 'Disabled'}\``, inline: true },
-            { name: 'Next Up', value: player.queue.tracks.length > 0 ? `⏭️ ${player.queue.tracks[0].info.title.substring(0, 50)}` : 'None', inline: true }
-        );
+        .setColor(player.paused ? 0x2b2d31 : 0x1DB954); // Grey if paused, Spotify Green if playing
 
     if (artworkUrl) {
         embed.setThumbnail(artworkUrl);
@@ -63,32 +52,28 @@ export function buildNowPlayingEmbed(player: any, track: any): EmbedBuilder {
 
 // Build all player button rows
 export function buildPlayerButtons(player: any): ActionRowBuilder<ButtonBuilder>[] {
-    // Row 1: Playback Controls (Prev, Pause/Play, Skip, Stop, Seek)
+    // Row 1: Playback Controls (Prev, Pause/Play, Skip, Stop)
     const row1 = new ActionRowBuilder<ButtonBuilder>().addComponents(
         new ButtonBuilder()
             .setCustomId('player_prev')
-            .setLabel('⏮️ Prev')
+            .setLabel('Prev')
             .setStyle(ButtonStyle.Secondary),
         new ButtonBuilder()
             .setCustomId('player_pause')
-            .setLabel(player.paused ? '▶️ Play' : '⏸️ Pause')
+            .setLabel(player.paused ? 'Play' : 'Pause')
             .setStyle(player.paused ? ButtonStyle.Success : ButtonStyle.Primary),
         new ButtonBuilder()
             .setCustomId('player_skip')
-            .setLabel('⏭️ Skip')
+            .setLabel('Skip')
             .setStyle(ButtonStyle.Secondary),
         new ButtonBuilder()
             .setCustomId('player_stop')
-            .setLabel('🛑 Stop')
-            .setStyle(ButtonStyle.Danger),
-        new ButtonBuilder()
-            .setCustomId('player_seek')
-            .setLabel('⏱️ Seek')
-            .setStyle(ButtonStyle.Secondary)
+            .setLabel('Stop')
+            .setStyle(ButtonStyle.Danger)
     );
 
-    // Row 2: Navigation (Loop, Shuffle, Rewind, Fast Forward, Queue)
-    const loopLabel = player.repeatMode === 'track' ? '🔂 Loop: Song' : player.repeatMode === 'queue' ? '🔁 Loop: Queue' : '🔁 Loop: Off';
+    // Row 2: Navigation (Loop, Shuffle, Queue)
+    const loopLabel = player.repeatMode === 'track' ? 'Loop: Song' : player.repeatMode === 'queue' ? 'Loop: Queue' : 'Loop: Off';
     const row2 = new ActionRowBuilder<ButtonBuilder>().addComponents(
         new ButtonBuilder()
             .setCustomId('player_loop')
@@ -96,44 +81,32 @@ export function buildPlayerButtons(player: any): ActionRowBuilder<ButtonBuilder>
             .setStyle(player.repeatMode !== 'off' ? ButtonStyle.Success : ButtonStyle.Secondary),
         new ButtonBuilder()
             .setCustomId('player_shuffle')
-            .setLabel('🔀 Shuffle')
-            .setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder()
-            .setCustomId('player_seek_back')
-            .setLabel('⏪ -30s')
-            .setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder()
-            .setCustomId('player_seek_forward')
-            .setLabel('⏩ +30s')
+            .setLabel('Shuffle')
             .setStyle(ButtonStyle.Secondary),
         new ButtonBuilder()
             .setCustomId('player_queue')
-            .setLabel('📋 View Queue')
+            .setLabel('View Queue')
             .setStyle(ButtonStyle.Secondary)
     );
 
-    // Row 3: Queue & Volume Management (Playlist Mode, Autoplay, Add Track, Remove Track, Vol Modal Button)
+    // Row 3: Queue Management (Playlist Mode, Autoplay, Add Track, Remove Track)
     const row3 = new ActionRowBuilder<ButtonBuilder>().addComponents(
         new ButtonBuilder()
             .setCustomId('player_playlist_mode')
-            .setLabel('🎵 Playlist Mode')
+            .setLabel('Playlist Mode')
             .setStyle(player.get('playlistModeActive') ? ButtonStyle.Success : ButtonStyle.Secondary),
         new ButtonBuilder()
             .setCustomId('player_autoplay')
-            .setLabel(`🤖 Autoplay: ${player.get('autoplay') ? 'ON' : 'OFF'}`)
+            .setLabel(`Autoplay: ${player.get('autoplay') ? 'ON' : 'OFF'}`)
             .setStyle(player.get('autoplay') ? ButtonStyle.Success : ButtonStyle.Secondary),
         new ButtonBuilder()
             .setCustomId('player_add')
-            .setLabel('➕ Add to Q')
+            .setLabel('Add Track')
             .setStyle(ButtonStyle.Success),
         new ButtonBuilder()
             .setCustomId('player_remove')
-            .setLabel('➖ Remove from Q')
-            .setStyle(ButtonStyle.Danger),
-        new ButtonBuilder()
-            .setCustomId('player_volume_btn')
-            .setLabel('🔊 Set Vol')
-            .setStyle(ButtonStyle.Secondary)
+            .setLabel('Remove Track')
+            .setStyle(ButtonStyle.Danger)
     );
 
     return [row1, row2, row3];
@@ -144,7 +117,7 @@ export function buildQueueEmbed(player: any, page = 1): { embed: EmbedBuilder; c
     const queue = player.queue.tracks;
     const current = player.queue.current;
     const embed = new EmbedBuilder()
-        .setTitle('🎵 Server Music Queue')
+        .setTitle('Queue')
         .setColor(0x1DB954);
 
     let description = '';
@@ -177,12 +150,12 @@ export function buildQueueEmbed(player: any, page = 1): { embed: EmbedBuilder; c
         const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
             new ButtonBuilder()
                 .setCustomId(`queue_page_prev_${currentPage}`)
-                .setLabel('◀️ Previous')
+                .setLabel('Previous')
                 .setStyle(ButtonStyle.Primary)
                 .setDisabled(currentPage === 1),
             new ButtonBuilder()
                 .setCustomId(`queue_page_next_${currentPage}`)
-                .setLabel('Next ▶️')
+                .setLabel('Next')
                 .setStyle(ButtonStyle.Primary)
                 .setDisabled(currentPage === totalPages)
         );
@@ -194,25 +167,25 @@ export function buildQueueEmbed(player: any, page = 1): { embed: EmbedBuilder; c
 
 // Build Playlist Mode Embed (a Spotify-like panel showing playlist tracks)
 export function buildPlaylistModeEmbed(playlistName: string, tracks: any[], currentUri: string | undefined): EmbedBuilder {
-    const embed = new EmbedBuilder()
-        .setTitle(`🎵 Playlist Mode: ${playlistName}`)
-        .setDescription(`Total Tracks: **${tracks.length}**`)
-        .setColor(0x1DB954);
+    let description = `Total Tracks: **${tracks.length}**\n\n`;
 
-    let trackList = '';
     if (tracks.length === 0) {
-        trackList = '*This playlist is currently empty.*';
+        description += '*This playlist is currently empty.*';
     } else {
         tracks.forEach((track, index) => {
             const isPlaying = currentUri && track.uri === currentUri;
-            const marker = isPlaying ? '▶️ ' : '  ';
+            const marker = isPlaying ? '● ' : '  ';
             const boldStart = isPlaying ? '**' : '';
             const boldEnd = isPlaying ? '**' : '';
-            trackList += `${marker}\`${index + 1}.\` ${boldStart}[${track.title}](${track.uri}) - \`${formatTime(track.duration)}\`${boldEnd}\n`;
+            description += `${marker}\`${index + 1}.\` ${boldStart}[${track.title}](${track.uri}) - \`${formatTime(track.duration)}\`${boldEnd}${isPlaying ? ' *(Playing)*' : ''}\n`;
         });
     }
 
-    embed.addFields({ name: 'Tracks List', value: trackList.substring(0, 1024) });
+    const embed = new EmbedBuilder()
+        .setTitle(`Playlist: ${playlistName}`)
+        .setDescription(description.substring(0, 4000))
+        .setColor(0x1DB954);
+
     return embed;
 }
 
@@ -221,15 +194,15 @@ export function buildPlaylistModeButtons(playlistName: string): ActionRowBuilder
     return new ActionRowBuilder<ButtonBuilder>().addComponents(
         new ButtonBuilder()
             .setCustomId(`playlist_mode_add_${playlistName}`)
-            .setLabel('➕ Save Playing to Playlist')
+            .setLabel('Save Current')
             .setStyle(ButtonStyle.Success),
         new ButtonBuilder()
             .setCustomId(`playlist_mode_remove_${playlistName}`)
-            .setLabel('➖ Remove Song')
+            .setLabel('Remove Song')
             .setStyle(ButtonStyle.Danger),
         new ButtonBuilder()
             .setCustomId('playlist_mode_close')
-            .setLabel('❌ Close Panel')
+            .setLabel('Close')
             .setStyle(ButtonStyle.Secondary)
     );
 }

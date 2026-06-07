@@ -1,6 +1,6 @@
 import { SlashCommandBuilder, ChatInputCommandInteraction, GuildMember, MessageFlags, EmbedBuilder, ActionRowBuilder, StringSelectMenuBuilder, StringSelectMenuOptionBuilder } from 'discord.js';
-import { createPlaylist, deletePlaylist, getUserPlaylists, addTrackToPlaylist, removeTrackFromPlaylist } from '../utils/playlistStore';
-import { buildPlaylistModeEmbed, buildPlaylistModeButtons } from '../utils/embeds';
+import { createPlaylist, deletePlaylist, getUserPlaylists, addTrackToPlaylist, removeTrackFromPlaylist, addTracksToPlaylist } from '../utils/playlistStore';
+import { buildPlaylistModeEmbed, buildPlaylistModeButtons, formatTime } from '../utils/embeds';
 
 export default {
     data: new SlashCommandBuilder()
@@ -8,8 +8,9 @@ export default {
         .setDescription('Manage your personal music playlists.')
         .addSubcommand(sub =>
             sub.setName('create')
-                .setDescription('Create a new empty playlist.')
+                .setDescription('Create a new playlist, optionally importing from a YouTube playlist URL.')
                 .addStringOption(opt => opt.setName('name').setDescription('Name of the playlist').setRequired(true))
+                .addStringOption(opt => opt.setName('url').setDescription('Optional YouTube playlist link to import songs from').setRequired(false))
         )
         .addSubcommand(sub =>
             sub.setName('delete')
@@ -40,7 +41,7 @@ export default {
         .addSubcommand(sub =>
             sub.setName('play')
                 .setDescription('Play all songs from a playlist in Playlist Mode.')
-                .addStringOption(opt => opt.setName('name').setDescription('Name of the playlist').setRequired(true))
+                .addStringOption(opt => opt.setName('name').setDescription('Name of the playlist').setRequired(false))
         ),
 
     async execute(interaction: ChatInputCommandInteraction, client: any) {
@@ -49,8 +50,101 @@ export default {
 
         if (subcommand === 'create') {
             const name = interaction.options.getString('name')!;
+            const url = interaction.options.getString('url');
+
             const result = createPlaylist(userId, name);
-            return interaction.reply({ content: result.message, flags: result.success ? undefined : MessageFlags.Ephemeral });
+            if (!result.success) {
+                return interaction.reply({ content: result.message, flags: result.success ? undefined : MessageFlags.Ephemeral });
+            }
+
+            if (!url) {
+                return interaction.reply({ content: result.message });
+            }
+
+            await interaction.deferReply();
+
+            const node = client.lavalink.nodeManager.leastUsedNodes()[0];
+            if (!node) {
+                return interaction.followUp({ content: `Playlist **${name}** was created, but no music servers were available to import tracks from the URL.` });
+            }
+
+            try {
+                const res = await node.search({ query: url }, interaction.user);
+                if (res.loadType === 'error' || res.loadType === 'empty') {
+                    return interaction.followUp({ content: `Playlist **${name}** was created, but we couldn't resolve any tracks from the provided URL.` });
+                }
+
+                let tracksToImport: any[] = [];
+                if (res.loadType === 'playlist') {
+                    tracksToImport = res.tracks;
+                } else if (res.loadType === 'track' || res.loadType === 'search') {
+                    tracksToImport = [res.tracks[0]];
+                }
+
+                if (tracksToImport.length === 0) {
+                    return interaction.followUp({ content: `Playlist **${name}** was created, but no tracks were found in the provided URL.` });
+                }
+
+                const trackDataList = tracksToImport.map(track => ({
+                    title: track.info.title,
+                    uri: track.info.uri,
+                    duration: track.info.duration,
+                    author: track.info.author,
+                    artworkUrl: track.info.artworkUrl || undefined
+                }));
+
+                addTracksToPlaylist(userId, name, trackDataList);
+
+                const member = interaction.member as GuildMember;
+                const voiceChannel = member?.voice?.channel;
+
+                if (!voiceChannel) {
+                    return interaction.followUp({
+                        content: `✅ Playlist **${name}** created and **${trackDataList.length}** song(s) imported from the URL!\n⚠️ *Note: You must be in a voice channel to start playing the playlist.*`
+                    });
+                }
+
+                const player = client.lavalink.createPlayer({
+                    guildId: interaction.guildId!,
+                    voiceChannelId: voiceChannel.id,
+                    textChannelId: interaction.channelId!,
+                    selfDeaf: true,
+                    selfMute: false,
+                    volume: 100
+                });
+
+                await player.connect();
+
+                await player.queue.add(tracksToImport);
+
+                player.set('playlistModeActive', true);
+                player.set('playlistModeName', name);
+                player.set('playlistModeTracks', trackDataList);
+                player.set('playlistModeOwnerId', userId);
+
+                if (!player.playing && !player.paused) {
+                    await player.play();
+                }
+
+                const currentTrackUri = player.queue.current?.info.uri;
+                const embed = buildPlaylistModeEmbed(name, trackDataList, currentTrackUri);
+                const buttons = buildPlaylistModeButtons(name);
+
+                const panelMsg = await (interaction.channel as any)?.send({ embeds: [embed], components: [buttons] });
+                if (panelMsg) {
+                    player.set('playlistPanelChannelId', interaction.channelId!);
+                    player.set('playlistPanelMessageId', panelMsg.id);
+                }
+
+                return interaction.followUp({
+                    content: `✅ Playlist **${name}** created with **${trackDataList.length}** song(s) imported!\n▶️ Playing in Playlist Mode now.`
+                });
+            } catch (error: any) {
+                console.error('Failed to import and play playlist:', error);
+                return interaction.followUp({
+                    content: `✅ Playlist **${name}** was created, but an error occurred while importing tracks: ${error.message || error}`
+                });
+            }
         }
 
         if (subcommand === 'delete') {
@@ -66,11 +160,25 @@ export default {
             }
 
             const embed = new EmbedBuilder()
-                .setTitle(`🎵 ${interaction.user.username}'s Playlists`)
+                .setTitle(`${interaction.user.username}'s Playlists`)
                 .setColor(0x1DB954)
-                .setDescription(playlists.map((p, i) => `\`${i + 1}.\` **${p.name}** — \`${p.tracks.length} tracks\``).join('\n'));
+                .setDescription(playlists.map((p, i) => `\`${i + 1}.\` **${p.name}** - \`${p.tracks.length} track(s)\``).join('\n'));
 
-            return interaction.reply({ embeds: [embed] });
+            const options = playlists.map(p =>
+                new StringSelectMenuOptionBuilder()
+                    .setLabel(p.name)
+                    .setDescription(`${p.tracks.length} track(s)`)
+                    .setValue(p.name)
+            );
+
+            const select = new StringSelectMenuBuilder()
+                .setCustomId('playlist_list_select_play')
+                .setPlaceholder('Select a playlist to play')
+                .addOptions(options);
+
+            const row = new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(select);
+
+            return interaction.reply({ embeds: [embed], components: [row] });
         }
 
         if (subcommand === 'view') {
@@ -83,13 +191,13 @@ export default {
             }
 
             const embed = new EmbedBuilder()
-                .setTitle(`🎵 Playlist: ${playlist.name}`)
+                .setTitle(`Playlist: ${playlist.name}`)
                 .setColor(0x1DB954);
 
             if (playlist.tracks.length === 0) {
                 embed.setDescription('*This playlist is empty.*');
             } else {
-                const list = playlist.tracks.map((t, i) => `\`${i + 1}.\` [${t.title}](${t.uri}) - \`${t.author}\``).join('\n');
+                const list = playlist.tracks.map((t, i) => `\`${i + 1}.\` [${t.title}](${t.uri}) - \`${t.author}\` (\`${formatTime(t.duration)}\`)`).join('\n');
                 embed.setDescription(list.substring(0, 4000));
             }
 
@@ -188,7 +296,7 @@ export default {
         }
 
         if (subcommand === 'play') {
-            const name = interaction.options.getString('name')!;
+            const name = interaction.options.getString('name');
             const member = interaction.member as GuildMember;
             const voiceChannel = member.voice.channel;
 
@@ -197,6 +305,27 @@ export default {
             }
 
             const playlists = getUserPlaylists(userId);
+            if (playlists.length === 0) {
+                return interaction.reply({ content: "You don't have any playlists yet! Use `/playlist create <name>` to get started.", flags: MessageFlags.Ephemeral });
+            }
+
+            if (!name) {
+                const options = playlists.map(p =>
+                    new StringSelectMenuOptionBuilder()
+                        .setLabel(p.name)
+                        .setDescription(`${p.tracks.length} track(s)`)
+                        .setValue(p.name)
+                );
+
+                const select = new StringSelectMenuBuilder()
+                    .setCustomId('playlist_list_select_play')
+                    .setPlaceholder('Select a playlist to play')
+                    .addOptions(options);
+
+                const row = new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(select);
+                return interaction.reply({ content: 'Select a playlist to play in Playlist Mode:', components: [row], flags: MessageFlags.Ephemeral });
+            }
+
             const playlist = playlists.find(p => p.name.toLowerCase() === name.toLowerCase());
 
             if (!playlist) {

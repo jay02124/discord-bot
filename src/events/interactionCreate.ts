@@ -1,4 +1,4 @@
-import { Events, Client, Interaction, MessageFlags, ModalBuilder, TextInputBuilder, TextInputStyle, ActionRowBuilder, StringSelectMenuBuilder, StringSelectMenuOptionBuilder, TextChannel } from 'discord.js';
+import { Events, Client, Interaction, MessageFlags, ModalBuilder, TextInputBuilder, TextInputStyle, ActionRowBuilder, StringSelectMenuBuilder, StringSelectMenuOptionBuilder, TextChannel, GuildMember } from 'discord.js';
 import { getUserPlaylists, addTrackToPlaylist, removeTrackFromPlaylist } from '../utils/playlistStore';
 import { buildPlaylistModeEmbed, buildPlaylistModeButtons, buildQueueEmbed, buildNowPlayingEmbed, buildPlayerButtons, formatTime } from '../utils/embeds';
 
@@ -60,6 +60,79 @@ export default {
                 const removedTrack = player.queue.tracks[index];
                 player.queue.splice(index, 1);
                 await interaction.reply({ content: `🗑️ Removed **${removedTrack.info.title}** from the queue.`, flags: MessageFlags.Ephemeral });
+            } else if (interaction.customId === 'playlist_list_select_play') {
+                const playlistName = interaction.values[0];
+                const member = interaction.member as GuildMember;
+                const voiceChannel = member?.voice?.channel;
+
+                if (!voiceChannel) {
+                    return interaction.reply({ content: 'You need to be in a voice channel to play a playlist!', flags: MessageFlags.Ephemeral });
+                }
+
+                await interaction.deferReply();
+
+                const playlists = getUserPlaylists(interaction.user.id);
+                const playlist = playlists.find(p => p.name.toLowerCase() === playlistName.toLowerCase());
+                if (!playlist) {
+                    return interaction.followUp({ content: `Playlist **${playlistName}** was not found.` });
+                }
+
+                if (playlist.tracks.length === 0) {
+                    return interaction.followUp({ content: `Playlist **${playlist.name}** has no tracks.` });
+                }
+
+                const player = client.lavalink.createPlayer({
+                    guildId: interaction.guildId!,
+                    voiceChannelId: voiceChannel.id,
+                    textChannelId: interaction.channelId!,
+                    selfDeaf: true,
+                    selfMute: false,
+                    volume: 100
+                });
+
+                await player.connect();
+
+                await interaction.followUp({ content: `🔄 Loading **${playlist.tracks.length}** songs from playlist **${playlist.name}** into the queue...` });
+
+                let loadedCount = 0;
+                for (const track of playlist.tracks) {
+                    try {
+                        const res = await player.search({ query: track.uri }, interaction.user);
+                        if (res.loadType === 'track' || res.loadType === 'search' || (res.loadType === 'playlist' && res.tracks.length > 0)) {
+                            await player.queue.add(res.tracks[0]);
+                            loadedCount++;
+                        } else {
+                            const fallbackRes = await player.search({ query: `ytmsearch:${track.author} ${track.title}` }, interaction.user);
+                            if (fallbackRes.tracks.length > 0) {
+                                await player.queue.add(fallbackRes.tracks[0]);
+                                loadedCount++;
+                            }
+                        }
+                    } catch (e) {
+                        console.error(`Failed to load track ${track.title}:`, e);
+                    }
+                }
+
+                player.set('playlistModeActive', true);
+                player.set('playlistModeName', playlist.name);
+                player.set('playlistModeTracks', playlist.tracks);
+                player.set('playlistModeOwnerId', interaction.user.id);
+
+                if (!player.playing && !player.paused) {
+                    await player.play();
+                }
+
+                const currentTrackUri = player.queue.current?.info.uri;
+                const embed = buildPlaylistModeEmbed(playlist.name, playlist.tracks, currentTrackUri);
+                const buttons = buildPlaylistModeButtons(playlist.name);
+
+                const panelMsg = await (interaction.channel as any)?.send({ embeds: [embed], components: [buttons] });
+                if (panelMsg) {
+                    player.set('playlistPanelChannelId', interaction.channelId!);
+                    player.set('playlistPanelMessageId', panelMsg.id);
+                }
+
+                return interaction.followUp({ content: `✅ Loaded **${loadedCount}/${playlist.tracks.length}** songs successfully. Playlist Mode is now **Active**.` });
             } else if (interaction.customId === 'player_playlist_select_play') {
                 const playlistName = interaction.values[0];
                 const player = client.lavalink.getPlayer(interaction.guildId!);
@@ -296,24 +369,26 @@ export default {
 
             // Normal player button controls
             if (interaction.customId === 'player_prev') {
+                await interaction.deferUpdate();
                 const previous = await player.queue.shiftPrevious();
                 if (!previous) {
-                    return interaction.reply({ content: 'No previous tracks in history.', flags: MessageFlags.Ephemeral });
+                    return interaction.followUp({ content: 'No previous tracks in history.', flags: MessageFlags.Ephemeral });
                 }
                 if (player.queue.current) {
                     player.queue.tracks.unshift(player.queue.current);
                 }
                 await player.play({ clientTrack: previous });
-                return interaction.reply({ content: '⏮️ Playing the previous track.', flags: MessageFlags.Ephemeral });
+                return interaction.followUp({ content: '⏮️ Playing the previous track.', flags: MessageFlags.Ephemeral });
             }
 
             if (interaction.customId === 'player_pause') {
+                await interaction.deferUpdate();
                 if (player.paused) {
                     await player.resume();
-                    await interaction.reply({ content: '▶️ Resumed the playback.', flags: MessageFlags.Ephemeral });
+                    await interaction.followUp({ content: '▶️ Resumed the playback.', flags: MessageFlags.Ephemeral });
                 } else {
                     await player.pause();
-                    await interaction.reply({ content: '⏸️ Paused the playback.', flags: MessageFlags.Ephemeral });
+                    await interaction.followUp({ content: '⏸️ Paused the playback.', flags: MessageFlags.Ephemeral });
                 }
                 // Refresh Now Playing message if needed (button styles updated)
                 const currentTrack = player.queue.current;
@@ -324,12 +399,14 @@ export default {
                     }).catch(() => {});
                 }
             } else if (interaction.customId === 'player_skip') {
+                await interaction.deferUpdate();
                 await player.skip();
-                await interaction.reply({ content: '⏭️ Skipped the track.', flags: MessageFlags.Ephemeral });
+                await interaction.followUp({ content: '⏭️ Skipped the track.', flags: MessageFlags.Ephemeral });
             } else if (interaction.customId === 'player_stop') {
+                await interaction.deferUpdate();
                 await player.queue.splice(0, player.queue.tracks.length);
                 await player.stopPlaying(false, true);
-                await interaction.reply({ content: '🛑 Stopped playback and cleared the queue.', flags: MessageFlags.Ephemeral });
+                await interaction.followUp({ content: '🛑 Stopped playback and cleared the queue.', flags: MessageFlags.Ephemeral });
             } else if (interaction.customId === 'player_queue') {
                 if (!player.queue.current && player.queue.tracks.length === 0) {
                     return interaction.reply({ content: 'The queue is currently empty.', flags: MessageFlags.Ephemeral });
@@ -337,9 +414,11 @@ export default {
                 const { embed, components } = buildQueueEmbed(player, 1);
                 await interaction.reply({ embeds: [embed], components, flags: MessageFlags.Ephemeral });
             } else if (interaction.customId === 'player_shuffle') {
+                await interaction.deferUpdate();
                 await player.queue.shuffle();
-                await interaction.reply({ content: '🔀 Queue has been shuffled!', flags: MessageFlags.Ephemeral });
+                await interaction.followUp({ content: '🔀 Queue has been shuffled!', flags: MessageFlags.Ephemeral });
             } else if (interaction.customId === 'player_loop') {
+                await interaction.deferUpdate();
                 const current = player.repeatMode;
                 let nextMode: 'off' | 'track' | 'queue' = 'off';
                 if (current === 'off') nextMode = 'track';
@@ -357,8 +436,9 @@ export default {
                     }).catch(() => {});
                 }
                 
-                await interaction.reply({ content: `🔁 Loop mode set to: **${modeStr}**`, flags: MessageFlags.Ephemeral });
+                await interaction.followUp({ content: `🔁 Loop mode set to: **${modeStr}**`, flags: MessageFlags.Ephemeral });
             } else if (interaction.customId === 'player_autoplay') {
+                await interaction.deferUpdate();
                 const isAutoplay = player.get('autoplay') || false;
                 player.set('autoplay', !isAutoplay);
 
@@ -370,7 +450,7 @@ export default {
                     }).catch(() => {});
                 }
 
-                await interaction.reply({ content: `🤖 Autoplay is now **${!isAutoplay ? 'Enabled' : 'Disabled'}**.`, flags: MessageFlags.Ephemeral });
+                await interaction.followUp({ content: `🤖 Autoplay is now **${!isAutoplay ? 'Enabled' : 'Disabled'}**.`, flags: MessageFlags.Ephemeral });
             } else if (interaction.customId === 'player_seek') {
                 const currentTrack = player.queue.current;
                 if (!currentTrack) {
@@ -393,8 +473,9 @@ export default {
 
                 await interaction.showModal(modal);
             } else if (interaction.customId === 'player_seek_back') {
+                await interaction.deferUpdate();
                 if (!player.queue.current) {
-                    return interaction.reply({ content: 'Nothing is playing right now.', flags: MessageFlags.Ephemeral });
+                    return interaction.followUp({ content: 'Nothing is playing right now.', flags: MessageFlags.Ephemeral });
                 }
                 const newPos = Math.max(0, player.position - 30000);
                 await player.seek(newPos);
@@ -406,10 +487,11 @@ export default {
                         components: buildPlayerButtons(player)
                     }).catch(() => {});
                 }
-                return interaction.reply({ content: `⏪ Rewound 30 seconds (now at **${formatTime(newPos)}**).`, flags: MessageFlags.Ephemeral });
+                return interaction.followUp({ content: `⏪ Rewound 30 seconds (now at **${formatTime(newPos)}**).`, flags: MessageFlags.Ephemeral });
             } else if (interaction.customId === 'player_seek_forward') {
+                await interaction.deferUpdate();
                 if (!player.queue.current) {
-                    return interaction.reply({ content: 'Nothing is playing right now.', flags: MessageFlags.Ephemeral });
+                    return interaction.followUp({ content: 'Nothing is playing right now.', flags: MessageFlags.Ephemeral });
                 }
                 const newPos = Math.min(player.queue.current.info.duration, player.position + 30000);
                 await player.seek(newPos);
@@ -421,7 +503,7 @@ export default {
                         components: buildPlayerButtons(player)
                     }).catch(() => {});
                 }
-                return interaction.reply({ content: `⏩ Fast forwarded 30 seconds (now at **${formatTime(newPos)}**).`, flags: MessageFlags.Ephemeral });
+                return interaction.followUp({ content: `⏩ Fast forwarded 30 seconds (now at **${formatTime(newPos)}**).`, flags: MessageFlags.Ephemeral });
             } else if (interaction.customId === 'player_volume_btn') {
                 const modal = new ModalBuilder()
                     .setCustomId('player_volume_modal')

@@ -135,3 +135,26 @@ export function removeTrackFromPlaylist(userId: string, playlistName: string, tr
         removedTrack: removed
     };
 }
+
+export function addTracksToPlaylist(userId: string, playlistName: string, tracks: PlaylistTrack[]): { success: boolean; message: string; addedCount: number } {
+    const data = loadPlaylists();
+    const playlists = data[userId] || [];
+
+    const playlist = playlists.find(p => p.name.toLowerCase() === playlistName.toLowerCase());
+    if (!playlist) {
+        return { success: false, message: `Playlist **${playlistName}** was not found.`, addedCount: 0 };
+    }
+
+    let addedCount = 0;
+    for (const track of tracks) {
+        playlist.tracks.push(track);
+        addedCount++;
+    }
+
+    savePlaylists(data);
+    return {
+        success: true,
+        message: `Added **${addedCount}** tracks to **${playlist.name}**!`,
+        addedCount
+    };
+}
