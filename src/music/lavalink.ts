@@ -1,16 +1,19 @@
 import { LavalinkManager as LavalinkClient } from 'lavalink-client';
-import { Client, TextChannel, ActionRowBuilder, ButtonBuilder, ButtonStyle } from 'discord.js';
+import { Client, TextChannel } from 'discord.js';
+import { buildNowPlayingEmbed, buildPlayerButtons, buildPlaylistModeEmbed } from '../utils/embeds';
 
 export class LavalinkManager extends LavalinkClient {
     constructor(client: Client) {
         super({
             nodes: [
                 {
-                    id: process.env.LAVALINK_HOST || 'mainNode',
+                    id: 'mainNode',
                     authorization: process.env.LAVALINK_PASSWORD || 'youshallnotpass',
                     host: process.env.LAVALINK_HOST || 'localhost',
                     port: parseInt(process.env.LAVALINK_PORT || '443'),
                     secure: process.env.LAVALINK_SECURE === 'true',
+                    retryDelay: 10000,
+                    retryAmount: 10,
                 },
             ],
             sendToShard: (guildId, payload) =>
@@ -58,65 +61,76 @@ export class LavalinkManager extends LavalinkClient {
 
         this.on('trackStart', (player, track) => {
             if (!track) return;
+            
             const channel = client.channels.cache.get(player.textChannelId!) as TextChannel;
             if (channel) {
-                const row = new ActionRowBuilder<ButtonBuilder>()
-                    .addComponents(
-                        new ButtonBuilder()
-                            .setCustomId('player_pause')
-                            .setLabel('Play/Pause')
-                            .setStyle(ButtonStyle.Primary),
-                        new ButtonBuilder()
-                            .setCustomId('player_skip')
-                            .setLabel('Skip')
-                            .setStyle(ButtonStyle.Secondary),
-                        new ButtonBuilder()
-                            .setCustomId('player_stop')
-                            .setLabel('Stop')
-                            .setStyle(ButtonStyle.Danger),
-                    );
+                // Delete previous Now Playing message
+                const oldNpMsgId = player.get('npMessageId') as string;
+                const oldNpChanId = player.get('npChannelId') as string;
+                if (oldNpMsgId && oldNpChanId) {
+                    const oldChannel = client.channels.cache.get(oldNpChanId) as TextChannel;
+                    if (oldChannel) {
+                        oldChannel.messages.delete(oldNpMsgId).catch(() => {});
+                    }
+                }
 
-                const row2 = new ActionRowBuilder<ButtonBuilder>()
-                    .addComponents(
-                        new ButtonBuilder()
-                            .setCustomId('player_queue')
-                            .setLabel('View Queue')
-                            .setStyle(ButtonStyle.Secondary),
-                        new ButtonBuilder()
-                            .setCustomId('player_shuffle')
-                            .setLabel('Shuffle')
-                            .setStyle(ButtonStyle.Secondary),
-                        new ButtonBuilder()
-                            .setCustomId('player_loop')
-                            .setLabel('Loop')
-                            .setStyle(ButtonStyle.Secondary),
-                        new ButtonBuilder()
-                            .setCustomId('player_add')
-                            .setLabel('Add')
-                            .setStyle(ButtonStyle.Success),
-                        new ButtonBuilder()
-                            .setCustomId('player_remove')
-                            .setLabel('Remove')
-                            .setStyle(ButtonStyle.Danger)
-                    );
-
+                // Send new Now Playing message
                 channel.send({
-                    embeds: [{
-                        color: 0x2b2d31,
-                        title: '🎵 Now Playing',
-                        description: `[${track.info.title}](${track.info.uri})`,
-                        fields: [
-                            { name: 'Duration', value: `\`${Math.round(track.info.duration / 1000)}s\``, inline: true },
-                            { name: 'Requester', value: `<@${(track.requester as any).id}>`, inline: true }
-                        ]
-                    }],
-                    components: [row, row2]
-                });
+                    embeds: [buildNowPlayingEmbed(player, track)],
+                    components: buildPlayerButtons(player)
+                }).then(msg => {
+                    player.set('npMessageId', msg.id);
+                    player.set('npChannelId', channel.id);
+                }).catch(console.error);
+            }
+
+            // Playlist Mode handling
+            if (player.get('playlistModeActive')) {
+                const playlistName = player.get('playlistModeName') as string;
+                const tracks = player.get('playlistModeTracks') as any[];
+                const panelMsgId = player.get('playlistPanelMessageId') as string;
+                const panelChanId = player.get('playlistPanelChannelId') as string;
+                
+                if (panelMsgId && panelChanId) {
+                    const panelChannel = client.channels.cache.get(panelChanId) as TextChannel;
+                    if (panelChannel) {
+                        const embed = buildPlaylistModeEmbed(playlistName, tracks, track.info.uri);
+                        panelChannel.messages.edit(panelMsgId, { embeds: [embed] }).catch(console.error);
+                    }
+                }
             }
         });
 
         this.on('queueEnd', (player, track, payload) => {
-             // Let the autoPlayFunction handle it if enabled, otherwise do nothing
+            // Delete NP message when queue ends
+            const npMsgId = player.get('npMessageId') as string;
+            const npChanId = player.get('npChannelId') as string;
+            if (npMsgId && npChanId) {
+                const oldChannel = client.channels.cache.get(npChanId) as TextChannel;
+                oldChannel?.messages.delete(npMsgId).catch(() => {});
+            }
+            player.set('npMessageId', null);
+            player.set('npChannelId', null);
         });
+
+        const cleanupPlayer = (player: any) => {
+            // Cleanup NP Message
+            const npMsgId = player.get('npMessageId') as string;
+            const npChanId = player.get('npChannelId') as string;
+            if (npMsgId && npChanId) {
+                const oldChannel = client.channels.cache.get(npChanId) as TextChannel;
+                oldChannel?.messages.delete(npMsgId).catch(() => {});
+            }
+
+            // Cleanup Playlist Mode Panel
+            const panelMsgId = player.get('playlistPanelMessageId') as string;
+            const panelChanId = player.get('playlistPanelChannelId') as string;
+            if (panelMsgId && panelChanId) {
+                const oldChannel = client.channels.cache.get(panelChanId) as TextChannel;
+                oldChannel?.messages.delete(panelMsgId).catch(() => {});
+            }
+        };
+
+        this.on('playerDestroy', cleanupPlayer);
     }
 }
