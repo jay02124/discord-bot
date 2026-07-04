@@ -1,5 +1,7 @@
-import * as fs from 'fs';
-import * as path from 'path';
+import mongoose from 'mongoose';
+import PlaylistModel, { IPlaylistTrack } from '../models/Playlist';
+
+// ─── Types (re-exported for backward compatibility) ──────────────────────────
 
 export interface PlaylistTrack {
     title: string;
@@ -15,110 +17,93 @@ export interface Playlist {
     createdAt: number;
 }
 
-// Map of userId -> Playlist[]
-export interface PlaylistData {
-    [userId: string]: Playlist[];
-}
+// ─── DB Connection ────────────────────────────────────────────────────────────
 
-const DATA_DIR = path.join(process.cwd(), 'data');
-const FILE_PATH = path.join(DATA_DIR, 'playlists.json');
+let isConnected = false;
 
-function ensureFileExists() {
-    if (!fs.existsSync(DATA_DIR)) {
-        fs.mkdirSync(DATA_DIR, { recursive: true });
+export async function connectDB(): Promise<void> {
+    if (isConnected) return;
+
+    const uri = process.env.MONGODB_URI;
+    if (!uri) {
+        throw new Error('MONGODB_URI is not defined in environment variables!');
     }
-    if (!fs.existsSync(FILE_PATH)) {
-        fs.writeFileSync(FILE_PATH, JSON.stringify({}, null, 2), 'utf-8');
-    }
-}
 
-export function loadPlaylists(): PlaylistData {
-    ensureFileExists();
     try {
-        const fileContent = fs.readFileSync(FILE_PATH, 'utf-8');
-        return JSON.parse(fileContent);
-    } catch (error) {
-        console.error('Failed to load playlists:', error);
-        return {};
-    }
-}
-
-export function savePlaylists(data: PlaylistData): void {
-    ensureFileExists();
-    try {
-        fs.writeFileSync(FILE_PATH, JSON.stringify(data, null, 2), 'utf-8');
-    } catch (error) {
-        console.error('Failed to save playlists:', error);
-    }
-}
-
-export function getUserPlaylists(userId: string): Playlist[] {
-    const data = loadPlaylists();
-    return data[userId] || [];
-}
-
-export function createPlaylist(userId: string, name: string): { success: boolean; message: string } {
-    const data = loadPlaylists();
-    if (!data[userId]) {
-        data[userId] = [];
+        await mongoose.connect(uri, {
+            serverSelectionTimeoutMS: 10000,
+            socketTimeoutMS: 45000,
+            maxPoolSize: 10,
+        });
+        isConnected = true;
+        console.log('✅ Connected to MongoDB successfully!');
+    } catch (err) {
+        console.error('❌ MongoDB connection error:', err);
+        throw err;
     }
 
-    const playlists = data[userId];
-    const exists = playlists.some(p => p.name.toLowerCase() === name.toLowerCase());
+    mongoose.connection.on('disconnected', () => {
+        isConnected = false;
+        console.warn('⚠️ MongoDB disconnected. Attempting to reconnect...');
+    });
+
+    mongoose.connection.on('reconnected', () => {
+        isConnected = true;
+        console.log('✅ MongoDB reconnected!');
+    });
+
+    mongoose.connection.on('error', (err) => {
+        console.error('MongoDB connection error:', err);
+    });
+}
+
+// ─── Store Functions ──────────────────────────────────────────────────────────
+
+export async function getUserPlaylists(userId: string): Promise<Playlist[]> {
+    const docs = await PlaylistModel.find({ userId }).lean().exec();
+    return docs.map(doc => ({
+        name: doc.name,
+        tracks: doc.tracks as PlaylistTrack[],
+        createdAt: new Date(doc.createdAt).getTime(),
+    }));
+}
+
+export async function createPlaylist(userId: string, name: string): Promise<{ success: boolean; message: string }> {
+    const exists = await PlaylistModel.exists({ userId, name: { $regex: new RegExp(`^${escapeRegex(name)}$`, 'i') } });
     if (exists) {
         return { success: false, message: `A playlist named **${name}** already exists!` };
     }
 
-    playlists.push({
-        name,
-        tracks: [],
-        createdAt: Date.now()
-    });
-
-    savePlaylists(data);
+    await PlaylistModel.create({ userId, name, tracks: [], createdAt: new Date() });
     return { success: true, message: `Playlist **${name}** has been created successfully!` };
 }
 
-export function deletePlaylist(userId: string, name: string): { success: boolean; message: string } {
-    const data = loadPlaylists();
-    const playlists = data[userId] || [];
-
-    const index = playlists.findIndex(p => p.name.toLowerCase() === name.toLowerCase());
-    if (index === -1) {
+export async function deletePlaylist(userId: string, name: string): Promise<{ success: boolean; message: string }> {
+    const result = await PlaylistModel.deleteOne({ userId, name: { $regex: new RegExp(`^${escapeRegex(name)}$`, 'i') } });
+    if (result.deletedCount === 0) {
         return { success: false, message: `Playlist **${name}** was not found.` };
     }
-
-    playlists.splice(index, 1);
-    data[userId] = playlists;
-    savePlaylists(data);
     return { success: true, message: `Playlist **${name}** has been deleted.` };
 }
 
-export function addTrackToPlaylist(userId: string, playlistName: string, track: PlaylistTrack): { success: boolean; message: string } {
-    const data = loadPlaylists();
-    const playlists = data[userId] || [];
-
-    const playlist = playlists.find(p => p.name.toLowerCase() === playlistName.toLowerCase());
+export async function addTrackToPlaylist(userId: string, playlistName: string, track: PlaylistTrack): Promise<{ success: boolean; message: string }> {
+    const playlist = await PlaylistModel.findOne({ userId, name: { $regex: new RegExp(`^${escapeRegex(playlistName)}$`, 'i') } });
     if (!playlist) {
         return { success: false, message: `Playlist **${playlistName}** was not found.` };
     }
 
-    // Avoid exact duplicate URIs in the same playlist to keep it clean, or allow it? Let's allow it but check if already exists to warn.
     const alreadyExists = playlist.tracks.some(t => t.uri === track.uri);
-    playlist.tracks.push(track);
+    playlist.tracks.push(track as IPlaylistTrack);
+    await playlist.save();
 
-    savePlaylists(data);
     return {
         success: true,
-        message: `Added **${track.title}** to **${playlist.name}**!${alreadyExists ? ' (Note: This song is already in this playlist)' : ''}`
+        message: `Added **${track.title}** to **${playlist.name}**!${alreadyExists ? ' (Note: This song is already in this playlist)' : ''}`,
     };
 }
 
-export function removeTrackFromPlaylist(userId: string, playlistName: string, trackIndex: number): { success: boolean; message: string; removedTrack?: PlaylistTrack } {
-    const data = loadPlaylists();
-    const playlists = data[userId] || [];
-
-    const playlist = playlists.find(p => p.name.toLowerCase() === playlistName.toLowerCase());
+export async function removeTrackFromPlaylist(userId: string, playlistName: string, trackIndex: number): Promise<{ success: boolean; message: string; removedTrack?: PlaylistTrack }> {
+    const playlist = await PlaylistModel.findOne({ userId, name: { $regex: new RegExp(`^${escapeRegex(playlistName)}$`, 'i') } });
     if (!playlist) {
         return { success: false, message: `Playlist **${playlistName}** was not found.` };
     }
@@ -128,33 +113,51 @@ export function removeTrackFromPlaylist(userId: string, playlistName: string, tr
     }
 
     const [removed] = playlist.tracks.splice(trackIndex, 1);
-    savePlaylists(data);
+    await playlist.save();
+
     return {
         success: true,
         message: `Removed **${removed.title}** from **${playlist.name}**.`,
-        removedTrack: removed
+        removedTrack: removed as PlaylistTrack,
     };
 }
 
-export function addTracksToPlaylist(userId: string, playlistName: string, tracks: PlaylistTrack[]): { success: boolean; message: string; addedCount: number } {
-    const data = loadPlaylists();
-    const playlists = data[userId] || [];
-
-    const playlist = playlists.find(p => p.name.toLowerCase() === playlistName.toLowerCase());
+export async function addTracksToPlaylist(userId: string, playlistName: string, tracks: PlaylistTrack[]): Promise<{ success: boolean; message: string; addedCount: number }> {
+    const playlist = await PlaylistModel.findOne({ userId, name: { $regex: new RegExp(`^${escapeRegex(playlistName)}$`, 'i') } });
     if (!playlist) {
         return { success: false, message: `Playlist **${playlistName}** was not found.`, addedCount: 0 };
     }
 
-    let addedCount = 0;
     for (const track of tracks) {
-        playlist.tracks.push(track);
-        addedCount++;
+        playlist.tracks.push(track as IPlaylistTrack);
     }
+    await playlist.save();
 
-    savePlaylists(data);
     return {
         success: true,
-        message: `Added **${addedCount}** tracks to **${playlist.name}**!`,
-        addedCount
+        message: `Added **${tracks.length}** tracks to **${playlist.name}**!`,
+        addedCount: tracks.length,
     };
+}
+
+export async function insertTrackAtPosition(userId: string, playlistName: string, track: PlaylistTrack, position: number): Promise<{ success: boolean; message: string }> {
+    const playlist = await PlaylistModel.findOne({ userId, name: { $regex: new RegExp(`^${escapeRegex(playlistName)}$`, 'i') } });
+    if (!playlist) {
+        return { success: false, message: `Playlist **${playlistName}** was not found.` };
+    }
+
+    const clampedPos = Math.min(Math.max(0, position), playlist.tracks.length);
+    playlist.tracks.splice(clampedPos, 0, track as IPlaylistTrack);
+    await playlist.save();
+
+    return {
+        success: true,
+        message: `Inserted **${track.title}** at position **${clampedPos + 1}** in **${playlist.name}**.`,
+    };
+}
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+function escapeRegex(str: string): string {
+    return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
