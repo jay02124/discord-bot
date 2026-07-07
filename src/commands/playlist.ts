@@ -1,4 +1,4 @@
-﻿import {
+import {
     SlashCommandBuilder,
     ChatInputCommandInteraction,
     GuildMember,
@@ -19,6 +19,13 @@ import {
 } from '../utils/playlistStore';
 import { buildManagerEmbed, buildManagerButtons, encodeManagerId } from '../utils/playlistManager';
 import { buildPlaylistModeEmbed, buildPlaylistModeButtons, formatTime } from '../utils/embeds';
+import {
+    parseSpotifyUrl,
+    getSpotifyPlaylistTracks,
+    getSpotifyAlbumTracks,
+    getSpotifyTrack,
+    searchSpotifyTracksOnLavalink,
+} from '../utils/spotify';
 
 export default {
     data: new SlashCommandBuilder()
@@ -26,9 +33,9 @@ export default {
         .setDescription('Manage your personal music playlists.')
         .addSubcommand(sub =>
             sub.setName('create')
-                .setDescription('Create a new playlist, optionally importing from a YouTube playlist URL.')
+                .setDescription('Create a new playlist, optionally importing from a YouTube or Spotify URL.')
                 .addStringOption(opt => opt.setName('name').setDescription('Name of the playlist').setRequired(true))
-                .addStringOption(opt => opt.setName('url').setDescription('Optional YouTube playlist link to import songs from').setRequired(false))
+                .addStringOption(opt => opt.setName('url').setDescription('Optional YouTube or Spotify link to import songs from').setRequired(false))
         )
         .addSubcommand(sub =>
             sub.setName('delete')
@@ -48,7 +55,7 @@ export default {
             sub.setName('add')
                 .setDescription('Add a song to a playlist.')
                 .addStringOption(opt => opt.setName('playlist').setDescription('Name of the playlist').setRequired(true))
-                .addStringOption(opt => opt.setName('song').setDescription('Song name or URL (leave empty to add currently playing)').setRequired(false))
+                .addStringOption(opt => opt.setName('song').setDescription('Song name, YouTube URL, or Spotify URL (leave empty to add current)').setRequired(false))
         )
         .addSubcommand(sub =>
             sub.setName('remove')
@@ -77,6 +84,69 @@ export default {
             const result = await createPlaylist(userId, name);
             if (!result.success) return interaction.reply({ content: result.message, flags: MessageFlags.Ephemeral });
             if (!url) return interaction.reply({ content: result.message });
+
+            const spotifyInfo = parseSpotifyUrl(url);
+            if (spotifyInfo) {
+                await interaction.deferReply();
+                const node = client.lavalink.nodeManager.leastUsedNodes()[0];
+                if (!node) return interaction.followUp({ content: `Playlist **${name}** created, but no music nodes available to import.` });
+
+                try {
+                    let spotifyTracks: any[] = [];
+                    if (spotifyInfo.type === 'playlist') {
+                        spotifyTracks = await getSpotifyPlaylistTracks(spotifyInfo.id);
+                    } else if (spotifyInfo.type === 'album') {
+                        spotifyTracks = await getSpotifyAlbumTracks(spotifyInfo.id);
+                    } else if (spotifyInfo.type === 'track') {
+                        const track = await getSpotifyTrack(spotifyInfo.id);
+                        spotifyTracks = [track];
+                    }
+
+                    if (spotifyTracks.length === 0) {
+                        return interaction.followUp({ content: `Playlist **${name}** created, but no tracks found in the Spotify link.` });
+                    }
+
+                    await interaction.followUp({ content: `Importing **${spotifyTracks.length}** track(s) from Spotify. Matching on YouTube...` });
+                    
+                    const resolvedTracks = await searchSpotifyTracksOnLavalink(node, spotifyTracks, interaction.user);
+                    if (resolvedTracks.length === 0) {
+                        return interaction.followUp({ content: `Playlist **${name}** created, but failed to match any tracks on YouTube.` });
+                    }
+
+                    const trackDataList = resolvedTracks.map((t: any) => ({
+                        title: t.info.title, uri: t.info.uri, duration: t.info.duration,
+                        author: t.info.author, artworkUrl: t.info.artworkUrl || undefined,
+                    }));
+                    await addTracksToPlaylist(userId, name, trackDataList);
+
+                    const member = interaction.member as GuildMember;
+                    const voiceChannel = member?.voice?.channel;
+                    if (!voiceChannel) {
+                        return interaction.followUp({ content: `Playlist **${name}** created with **${trackDataList.length}** songs! Join a voice channel and use /playlist play to start.` });
+                    }
+
+                    const player = client.lavalink.createPlayer({
+                        guildId: interaction.guildId!, voiceChannelId: voiceChannel.id,
+                        textChannelId: interaction.channelId!, selfDeaf: true, selfMute: false, volume: 100,
+                    });
+                    await player.connect();
+                    await player.queue.add(resolvedTracks);
+                    player.set('playlistModeActive', true);
+                    player.set('playlistModeName', name);
+                    player.set('playlistModeTracks', trackDataList);
+                    player.set('playlistModeOwnerId', userId);
+                    if (!player.playing && !player.paused) await player.play();
+
+                    const embed = buildPlaylistModeEmbed(name, trackDataList, player.queue.current?.info.uri);
+                    const buttons = buildPlaylistModeButtons(name);
+                    const panelMsg = await (interaction.channel as any)?.send({ embeds: [embed], components: [buttons] });
+                    if (panelMsg) { player.set('playlistPanelChannelId', interaction.channelId!); player.set('playlistPanelMessageId', panelMsg.id); }
+                    return interaction.followUp({ content: `Playlist **${name}** created with **${trackDataList.length}** songs! Now playing.` });
+                } catch (error: any) {
+                    console.error('Failed to import Spotify playlist:', error);
+                    return interaction.followUp({ content: `Playlist **${name}** created, but import failed: ${error.message}` });
+                }
+            }
 
             await interaction.deferReply();
             const node = client.lavalink.nodeManager.leastUsedNodes()[0];
@@ -170,6 +240,42 @@ export default {
                 await interaction.deferReply({ flags: MessageFlags.Ephemeral });
                 const node = client.lavalink.nodeManager.leastUsedNodes()[0];
                 if (!node) return interaction.followUp({ content: 'No music nodes available.' });
+
+                const spotifyInfo = parseSpotifyUrl(songQuery);
+                if (spotifyInfo) {
+                    try {
+                        let spotifyTracks: any[] = [];
+                        if (spotifyInfo.type === 'playlist') {
+                            spotifyTracks = await getSpotifyPlaylistTracks(spotifyInfo.id);
+                        } else if (spotifyInfo.type === 'album') {
+                            spotifyTracks = await getSpotifyAlbumTracks(spotifyInfo.id);
+                        } else if (spotifyInfo.type === 'track') {
+                            const track = await getSpotifyTrack(spotifyInfo.id);
+                            spotifyTracks = [track];
+                        }
+
+                        if (spotifyTracks.length === 0) {
+                            return interaction.followUp({ content: 'No tracks found in the Spotify link.' });
+                        }
+
+                        await interaction.followUp({ content: `Importing and matching **${spotifyTracks.length}** track(s) from Spotify...` });
+                        const resolvedTracks = await searchSpotifyTracksOnLavalink(node, spotifyTracks, interaction.user);
+                        if (resolvedTracks.length === 0) {
+                            return interaction.followUp({ content: 'Failed to resolve any matching tracks on YouTube.' });
+                        }
+
+                        const trackDataList = resolvedTracks.map((t: any) => ({
+                            title: t.info.title, uri: t.info.uri, duration: t.info.duration,
+                            author: t.info.author, artworkUrl: t.info.artworkUrl || undefined,
+                        }));
+                        await addTracksToPlaylist(userId, playlist.name, trackDataList);
+                        return interaction.followUp({ content: `Successfully added **${trackDataList.length}** track(s) from Spotify to **${playlist.name}**!` });
+                    } catch (error: any) {
+                        console.error('Failed to add Spotify tracks to playlist:', error);
+                        return interaction.followUp({ content: `Failed to add Spotify tracks: ${error.message}` });
+                    }
+                }
+
                 const res = await node.search({ query: songQuery }, interaction.user);
                 if (res.loadType === 'error' || res.loadType === 'empty') return interaction.followUp({ content: 'No results found.' });
                 const track = res.tracks[0];
